@@ -7,6 +7,7 @@ export default function VoiceToTextCircularUI() {
   const canvasRef = useRef(null);
   const transcriptEndRef = useRef(null);
   const animationRef = useRef(null);
+  const lastFinalRef = useRef("");
 
   const {
     transcript,
@@ -16,33 +17,49 @@ export default function VoiceToTextCircularUI() {
     browserSupportsSpeechRecognition,
   } = useSpeechRecognition();
 
+  const [finalText, setFinalText] = useState("");
   const [isSpeaking, setIsSpeaking] = useState(false);
 
-  // START
-  const startListening = async () => {
-    if (!browserSupportsSpeechRecognition) {
-      alert("Speech Recognition is not supported.");
-      return;
+  // ✅ FINALIZED TEXT ONLY
+  useEffect(() => {
+    if (!transcript || transcript === lastFinalRef.current) return;
+
+    if (transcript.startsWith(lastFinalRef.current)) {
+      const delta = transcript.slice(lastFinalRef.current.length).trim();
+      if (delta) {
+        setFinalText((prev) => (prev + " " + delta).trim());
+      }
+    } else {
+      setFinalText(transcript);
     }
 
-    SpeechRecognition.startListening({
-      continuous: true,
-      interimResults: true,
-      language: "en-US",
-    });
+    lastFinalRef.current = transcript;
+  }, [transcript]);
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const audioContext = new (window.AudioContext ||
-      window.webkitAudioContext)();
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 256;
-
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
+  // 🎧 ALWAYS-ON EQUALIZER (IDLE + SPEAKING)
+  useEffect(() => {
+    let audioContext;
+    let analyser;
+    let dataArray;
+    let source;
+    let stream;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    const initAudio = async () => {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioContext = new (window.AudioContext ||
+        window.webkitAudioContext)();
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      draw();
+    };
 
     const draw = () => {
       analyser.getByteTimeDomainData(dataArray);
@@ -65,14 +82,15 @@ export default function VoiceToTextCircularUI() {
 
       for (let i = 0; i < bars; i++) {
         const angle = (i * Math.PI * 2) / bars;
-        const barHeight = volume * 180;
+
+        // idle pulse when silent
+        const idlePulse = Math.sin(Date.now() / 300 + i) * 4;
+        const barHeight = volume > 0.02 ? volume * 180 : 12 + idlePulse;
 
         const x1 = cx + Math.cos(angle) * baseRadius;
         const y1 = cy + Math.sin(angle) * baseRadius;
-        const x2 =
-          cx + Math.cos(angle) * (baseRadius + barHeight);
-        const y2 =
-          cy + Math.sin(angle) * (baseRadius + barHeight);
+        const x2 = cx + Math.cos(angle) * (baseRadius + barHeight);
+        const y2 = cy + Math.sin(angle) * (baseRadius + barHeight);
 
         ctx.strokeStyle = `hsl(${i * 6}, 85%, 55%)`;
         ctx.lineWidth = 2;
@@ -85,22 +103,43 @@ export default function VoiceToTextCircularUI() {
       animationRef.current = requestAnimationFrame(draw);
     };
 
-    draw();
+    initAudio();
+
+    return () => {
+      cancelAnimationFrame(animationRef.current);
+      stream?.getTracks().forEach((t) => t.stop());
+      audioContext?.close();
+    };
+  }, []);
+
+  // START LISTENING
+  const startListening = () => {
+    if (!browserSupportsSpeechRecognition) {
+      alert("Speech Recognition is not supported.");
+      return;
+    }
+
+    lastFinalRef.current = "";
+    setFinalText("");
+
+    SpeechRecognition.startListening({
+      continuous: true,
+      interimResults: true,
+      language: "en-US",
+    });
   };
 
-  // STOP
+  // STOP LISTENING
   const stopListening = () => {
     SpeechRecognition.stopListening();
-    cancelAnimationFrame(animationRef.current);
-    setIsSpeaking(false);
   };
 
-  // Auto-scroll
+  // AUTO SCROLL FINAL TEXT
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [transcript, interimTranscript]);
+  }, [finalText]);
 
-  // Canvas resize
+  // RESPONSIVE CANVAS
   useEffect(() => {
     const canvas = canvasRef.current;
     const resize = () => {
@@ -122,6 +161,13 @@ export default function VoiceToTextCircularUI() {
           <p className="text-gray-500 text-sm mb-4">Live mic input</p>
 
           <canvas ref={canvasRef} className="rounded-full" />
+
+          {/* 👀 PREVIEW TEXT */}
+          {interimTranscript && listening && (
+            <p className="mt-4 text-sm text-gray-500 italic text-center">
+              {interimTranscript} ▌
+            </p>
+          )}
 
           <button
             onClick={listening ? stopListening : startListening}
@@ -157,16 +203,11 @@ export default function VoiceToTextCircularUI() {
           <h2 className="font-semibold text-lg mb-2">Live Transcription</h2>
 
           <div className="flex-1 bg-gray-50 border rounded-xl p-4 overflow-y-auto">
-            {transcript || interimTranscript ? (
+            {finalText ? (
               <>
                 <p className="text-gray-800 whitespace-pre-line leading-relaxed">
-                  {transcript}
+                  {finalText}
                 </p>
-                {interimTranscript && (
-                  <p className="text-gray-500 italic">
-                    {interimTranscript} ▌
-                  </p>
-                )}
                 <div ref={transcriptEndRef} />
               </>
             ) : (
@@ -178,8 +219,12 @@ export default function VoiceToTextCircularUI() {
 
           <button
             className="mt-4 bg-gray-100 hover:bg-gray-200 py-2 rounded-md text-gray-700"
-            onClick={resetTranscript}
-            disabled={!transcript && !interimTranscript}
+            onClick={() => {
+              resetTranscript();
+              setFinalText("");
+              lastFinalRef.current = "";
+            }}
+            disabled={!finalText}
           >
             Clear
           </button>
